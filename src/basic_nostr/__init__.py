@@ -13,3 +13,4 @@ from .basic_nostr import (
     read_events_from_relays,
     DEFAULT_RELAYS,
 )
+from .client import NostrClient

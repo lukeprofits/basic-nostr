@@ -11,8 +11,8 @@ An intentionally tiny NOSTR library for Python: Keys, DMs, Posts, & Products.
 
 I made `basic-nostr` because no other Python packages make it this simple.
 
-If it does exactly what you need → great, use it.  
-If it doesn’t → don’t use it. Simple as that.
+If it does exactly what you need → great, use it.
+If it doesn't → don't use it. Simple as that.
 
 
 ## Install
@@ -23,111 +23,43 @@ pip install basic-nostr
 
 ## Usage
 
-All functions take keys as bech32 `nsec1...`/`npub1...` strings (you never need to think about hex). Everything is async. 
+All functions take keys as bech32 `nsec1...`/`npub1...` strings (you never need to think about hex).
 
-Import everything at once:
-```python
-import basic_nostr
-basic_nostr.make_keys()
-```
+### NostrClient (recommended)
 
-Or import just what you need:
-```python
-from basic_nostr import make_keys, send_dm, read_dms
-```
-
-### Generate keys
+`NostrClient` handles relay connections and async internals for you. No `asyncio` knowledge needed. Connects automatically on first use.
 
 ```python
-from basic_nostr import make_keys
+from basic_nostr import make_keys, NostrClient
 
 npub, nsec = make_keys()
 print(npub)  # npub1...  (share this)
-print(nsec)  # nsec1...  (keep this secret, paste into Amethyst to log in)
-```
+print(nsec)  # nsec1...  (keep secret — paste into Amethyst to log in)
 
-### Connect to relays
+nostr = NostrClient(nsec)
 
-```python
-from basic_nostr import connect_to_relays, close_relays
+# Post a note
+nostr.make_post("Hello Nostr!", tags=[["t", "introduction"]])
 
-relays = await connect_to_relays()  # uses default relays
+# Read posts — filter by author, hashtag, or both
+posts = nostr.read_posts(authors=[npub], limit=20)
+posts = nostr.read_posts(tag_filters={"t": ["monero"]})
 
-# or pick your own:
-custom_relays = ["wss://relay.damus.io", "wss://nos.lol"]
-relays = await connect_to_relays(custom_relays)
+# Send DM (NIP-17 by default — sender hidden from relays)
+nostr.send_dm(their_npub, "hey!")
+nostr.send_dm(their_npub, "hey!", protocol="nip04")  # legacy (older clients)
+nostr.send_dm(their_npub, "hey!", protocol="both")   # maximum compatibility
 
-# when you're done:
-await close_relays(relays)
-```
-
-### Make Post
-
-```python
-from basic_nostr import make_post
-
-event, responses = await make_post(
-    relays,
-    content="Hello Nostr!",
-    tags=[["t", "introduction"]],
-    private_key=nsec,
-)
-```
-
-### Read Posts
-
-```python
-from basic_nostr import read_posts
-
-# Get someone's recent posts
-posts = await read_posts(relays, authors=[npub], limit=20)
-
-# Search by hashtag
-posts = await read_posts(relays, tag_filters={"t": ["monero"]})
-
-# Combine filters
-posts = await read_posts(relays, authors=[npub], tag_filters={"t": ["monero"]})
-```
-
-### Send DM
-
-```python
-from basic_nostr import send_dm
-
-# NIP-17 (modern, private — sender hidden from relays)
-await send_dm(relays, nsec, their_npub, "hey!")
-
-# NIP-04 (legacy — works with older clients)
-await send_dm(relays, nsec, their_npub, "hey!", protocol="nip04")
-
-# Send both (maximum compatibility)
-await send_dm(relays, nsec, their_npub, "hey!", protocol="both")
-```
-
-### Read DMs
-
-```python
-from basic_nostr import read_dms
-
-# Reads both NIP-17 and NIP-04 messages by default
-dms = await read_dms(relays, nsec)
-
+# Read DMs (reads both NIP-17 and NIP-04 by default)
+dms = nostr.read_dms()
 for dm in dms:
-    print(f"From: {dm['sender']}")     # npub1...
+    print(f"From: {dm['sender']}")       # npub1...
     print(f"Message: {dm['message']}")
     print(f"Protocol: NIP-{dm['nip']}")  # 17 or 4
-```
+    print(f"Time: {dm['timestamp']}")    # unix timestamp
 
-### List Product
-
-Shows up on [Shopstr](https://shopstr.store), [Plebeian Market](https://plebeian.market), and other Nostr marketplaces.
-
-```python
-from basic_nostr import list_product
-
-await list_product(
-    relays,
-    private_key=nsec,
+# List a product — shows up on Shopstr, Plebeian Market, etc.
+nostr.list_product(
     title="Vintage Keyboard",
     description="Cherry MX Blues, great condition.",
     price=75,
@@ -137,19 +69,58 @@ await list_product(
     condition="used",
     location="US",
 )
-```
 
-### Read Product Listings
-
-```python
-from basic_nostr import read_products
-
-products = await read_products(relays, limit=50)
-
+# Read products and parse tags
+products = nostr.read_products(limit=50)
 for product in products:
     tags = {t[0]: t[1:] for t in product["tags"]}
     print(f"{tags['title'][0]} — {tags['price'][0]} {tags['price'][1]}")
+
+# Close when done (or use context manager below)
+nostr.close()
 ```
+
+Read-only usage (no private key needed):
+```python
+nostr = NostrClient()
+posts = nostr.read_posts(tag_filters={"t": ["monero"]})
+products = nostr.read_products(limit=10)
+nostr.close()
+```
+
+Context manager works too (auto-closes):
+```python
+with NostrClient(nsec) as nostr:
+    nostr.make_post("Hello!")
+```
+
+Custom relays:
+```python
+nostr = NostrClient(nsec, relay_urls=["wss://relay.damus.io", "wss://nos.lol"])
+nostr.make_post("Hello from custom relays!")
+```
+
+### Async API
+
+All async functions are also exported if you need them directly:
+
+```python
+import asyncio
+from basic_nostr import make_keys, connect_to_relays, close_relays, make_post, read_posts
+
+async def main():
+    npub, nsec = make_keys()
+    relays = await connect_to_relays()
+    try:
+        await make_post(relays, "Hello Nostr!", [["t", "introduction"]], nsec)
+        posts = await read_posts(relays, authors=[npub], limit=20)
+    finally:
+        await close_relays(relays)
+
+asyncio.run(main())
+```
+
+Available async functions: `connect_to_relays`, `close_relays`, `make_post`, `read_posts`, `list_product`, `read_products`, `send_dm`, `read_dms`, `read_events_from_relays`.
 
 
 ## Contributing
