@@ -1,5 +1,5 @@
 # basic-nostr
-An intentionally tiny NOSTR library for Python: Keys, DMs, Posts, & Products.
+A simple way to use NOSTR from Python: Keys, DMs, Posts, & Products.
 
 ## Description
 `basic-nostr` does exactly four things:
