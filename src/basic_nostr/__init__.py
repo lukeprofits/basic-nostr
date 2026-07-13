@@ -12,6 +12,7 @@ from .basic_nostr import (
     deletion_targets,
     read_stalls,
     parse_stall,
+    verify_event,
     send_dm,
     read_dms,
     read_events_from_relays,

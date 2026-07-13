@@ -302,6 +302,27 @@ def _sign_event(event_dict, private_key_hex):
     return event_dict
 
 
+def verify_event(event):
+    """Fully validate an event from an untrusted relay (NIP-01): recompute its
+    id from [0,pubkey,created_at,kind,tags,content] and confirm it matches,
+    THEN verify the Schnorr signature. Both are needed — checking the sig alone
+    lets an attacker keep a real (id, sig) but swap tags/content. Use this
+    before acting on destructive events like NIP-09 deletions.
+    """
+    try:
+        serialized = json.dumps(
+            [0, event["pubkey"], event["created_at"], event["kind"],
+             event.get("tags", []), event.get("content", "")],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != event.get("id"):
+            return False
+    except (KeyError, TypeError):
+        return False
+    return _verify_event_signature(event)
+
+
 def _verify_event_signature(event_dict):
     """Verify a Nostr event's Schnorr signature. Returns True/False."""
     try:
@@ -314,31 +335,6 @@ def _verify_event_signature(event_dict):
 
 
 # ─── 3. Relay connection ─────────────────────────────────────────────────────
-
-
-async def _connect_via_proxy(url, proxy, ssl_context):
-    """Open a relay websocket through a SOCKS/HTTP proxy (e.g. Tor at
-    socks5://127.0.0.1:9050). Requires the optional `python-socks` package."""
-    try:
-        from python_socks.async_.asyncio import Proxy
-    except ImportError as e:
-        raise RuntimeError(
-            "proxy connections require the 'python-socks' package "
-            "(pip install python-socks)"
-        ) from e
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    is_tls = parsed.scheme == "wss"
-    host = parsed.hostname
-    port = parsed.port or (443 if is_tls else 80)
-    sock = await Proxy.from_url(proxy).connect(dest_host=host, dest_port=port)
-    return await websockets.connect(
-        url,
-        sock=sock,
-        ssl=ssl_context if is_tls else None,
-        server_hostname=host if is_tls else None,
-    )
 
 
 async def connect_to_relays(relay_urls=None, proxy=None):
@@ -364,12 +360,13 @@ async def connect_to_relays(relay_urls=None, proxy=None):
     except ImportError:
         pass  # Use system certs if certifi not installed
 
+    # websockets>=15 has native proxy support (uses python-socks for socks5).
+    # Only pass proxy when set so we don't pick up ambient env proxies.
+    extra = {"proxy": proxy} if proxy else {}
+
     async def _try_connect(url):
         try:
-            if proxy:
-                ws = await _connect_via_proxy(url, proxy, ssl_context)
-            else:
-                ws = await websockets.connect(url, ssl=ssl_context)
+            ws = await websockets.connect(url, ssl=ssl_context, **extra)
             return (url, ws)
         except Exception as e:
             print(f"[WARN] Failed to connect to {url}: {e}")
@@ -696,11 +693,14 @@ async def read_deletions(relays, authors=None, since=None, until=None, limit=100
     A deletion event asks relays/clients to drop the events it references.
     Use deletion_targets() to read what each one targets.
 
-    Returns: list of kind-5 event dicts, deduplicated, newest first.
+    Deletions are destructive, so results are signature-verified here —
+    forged/unsigned kind-5 events are dropped. Returns verified kind-5 event
+    dicts, deduplicated, newest first.
     """
-    return await read_events_from_relays(
+    events = await read_events_from_relays(
         relays, authors=authors, since=since, until=until, limit=limit, kinds=[5],
     )
+    return [e for e in events if verify_event(e)]
 
 
 def deletion_targets(event):
