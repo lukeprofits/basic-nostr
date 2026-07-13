@@ -92,9 +92,10 @@ class NostrClient:
             nostr.make_post("Hello!")
     """
 
-    def __init__(self, private_key=None, relay_urls=None):
+    def __init__(self, private_key=None, relay_urls=None, proxy=None):
         self._private_key = private_key
         self._relay_urls = relay_urls
+        self._proxy = proxy  # e.g. "socks5://127.0.0.1:9050" to route via Tor
         self._relays = None
 
     # ── Connection lifecycle ────────────────────────────────────────────
@@ -102,7 +103,7 @@ class NostrClient:
     def connect(self, relay_urls=None):
         """Connect to relays. Called automatically on first use."""
         urls = relay_urls or self._relay_urls
-        self._relays = _run(_async.connect_to_relays(urls))
+        self._relays = _run(_async.connect_to_relays(urls, proxy=self._proxy))
         return self
 
     def close(self):
@@ -178,6 +179,18 @@ class NostrClient:
         return _run(_async.read_products(
             self.relays, authors=authors, tag_filters=tag_filters,
             since=since, until=until, limit=limit,
+        ))
+
+    def read_deletions(self, authors=None, since=None, until=None, limit=100):
+        """Read NIP-09 deletion events (kind 5). See deletion_targets()."""
+        return _run(_async.read_deletions(
+            self.relays, authors=authors, since=since, until=until, limit=limit,
+        ))
+
+    def read_stalls(self, authors=None, since=None, until=None, limit=100):
+        """Read NIP-15 stall metadata (kind 30017). See parse_stall()."""
+        return _run(_async.read_stalls(
+            self.relays, authors=authors, since=since, until=until, limit=limit,
         ))
 
     def read_dms(self, since=None, limit=50, protocol="both"):

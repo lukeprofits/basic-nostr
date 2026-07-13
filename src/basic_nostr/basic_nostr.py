@@ -4,10 +4,16 @@ Simple Nostr implementation in Python — no Nostr-specific libraries.
 Implements:
   - NIP-01: Core protocol (events, signing, relay communication)
   - NIP-04: Legacy direct messages (AES-encrypted, kind 4)
+  - NIP-09: Event deletion (kind 5) — read_deletions / deletion_targets
+  - NIP-15: Marketplace stalls (kind 30017) — read_stalls / parse_stall
   - NIP-17: Private direct messages (gift-wrapped, NIP-44 encrypted, kind 1059)
   - NIP-19: bech32 key encoding (nsec/npub)
   - NIP-44: Versioned encryption (ChaCha20 + HMAC, used by NIP-17)
   - NIP-99: Classified listings / marketplace (kind 30402)
+
+Relay connections can route through a proxy (e.g. Tor) — pass
+proxy="socks5://127.0.0.1:9050" to NostrClient / connect_to_relays
+(needs the optional `python-socks` package: pip install basic-nostr[proxy]).
 
 Install:
   pip install basic-nostr
@@ -310,11 +316,41 @@ def _verify_event_signature(event_dict):
 # ─── 3. Relay connection ─────────────────────────────────────────────────────
 
 
-async def connect_to_relays(relay_urls=None):
+async def _connect_via_proxy(url, proxy, ssl_context):
+    """Open a relay websocket through a SOCKS/HTTP proxy (e.g. Tor at
+    socks5://127.0.0.1:9050). Requires the optional `python-socks` package."""
+    try:
+        from python_socks.async_.asyncio import Proxy
+    except ImportError as e:
+        raise RuntimeError(
+            "proxy connections require the 'python-socks' package "
+            "(pip install python-socks)"
+        ) from e
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    is_tls = parsed.scheme == "wss"
+    host = parsed.hostname
+    port = parsed.port or (443 if is_tls else 80)
+    sock = await Proxy.from_url(proxy).connect(dest_host=host, dest_port=port)
+    return await websockets.connect(
+        url,
+        sock=sock,
+        ssl=ssl_context if is_tls else None,
+        server_hostname=host if is_tls else None,
+    )
+
+
+async def connect_to_relays(relay_urls=None, proxy=None):
     """Connect to Nostr relays via WebSocket.
 
     Connects concurrently. Skips relays that fail to connect (logs warning).
     Returns list of (url, websocket) tuples for successful connections.
+
+    Args:
+        relay_urls: relay wss:// URLs (defaults to DEFAULT_RELAYS).
+        proxy: optional proxy URL, e.g. "socks5://127.0.0.1:9050" to route
+            every relay connection through Tor. Needs `python-socks`.
     """
     if relay_urls is None:
         relay_urls = DEFAULT_RELAYS
@@ -330,7 +366,10 @@ async def connect_to_relays(relay_urls=None):
 
     async def _try_connect(url):
         try:
-            ws = await websockets.connect(url, ssl=ssl_context)
+            if proxy:
+                ws = await _connect_via_proxy(url, proxy, ssl_context)
+            else:
+                ws = await websockets.connect(url, ssl=ssl_context)
             return (url, ws)
         except Exception as e:
             print(f"[WARN] Failed to connect to {url}: {e}")
@@ -646,6 +685,86 @@ async def read_products(relays, authors=None, tag_filters=None, since=None, unti
         relays, authors=authors, tag_filters=tag_filters,
         since=since, until=until, limit=limit, kinds=[30402],
     )
+
+
+# ─── 6c. NIP-09 deletions ────────────────────────────────────────────────────
+
+
+async def read_deletions(relays, authors=None, since=None, until=None, limit=100):
+    """Read deletion events (NIP-09, kind 5) from relays.
+
+    A deletion event asks relays/clients to drop the events it references.
+    Use deletion_targets() to read what each one targets.
+
+    Returns: list of kind-5 event dicts, deduplicated, newest first.
+    """
+    return await read_events_from_relays(
+        relays, authors=authors, since=since, until=until, limit=limit, kinds=[5],
+    )
+
+
+def deletion_targets(event):
+    """What a NIP-09 deletion event (kind 5) targets.
+
+    Returns a dict:
+        {"pubkey": <author>,
+         "event_ids": [<id>, ...],          # 'e' tags — plain events
+         "addresses": ["<kind>:<pubkey>:<d>", ...]}  # 'a' tags — replaceable
+
+    Only the event's own author may delete their events, so callers should
+    match targets against events by the SAME pubkey.
+    """
+    tags = event.get("tags") or []
+    event_ids = [t[1] for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "e"]
+    addresses = [t[1] for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "a"]
+    return {
+        "pubkey": event.get("pubkey"),
+        "event_ids": event_ids,
+        "addresses": addresses,
+    }
+
+
+# ─── 6d. NIP-15 stalls ───────────────────────────────────────────────────────
+
+
+async def read_stalls(relays, authors=None, since=None, until=None, limit=100):
+    """Read marketplace stall metadata (NIP-15, kind 30017) from relays.
+
+    A stall is a seller's shop: name, currency, and shipping zones that its
+    products (kind 30402/30018) reference by stall id. Use parse_stall().
+
+    Returns: list of kind-30017 event dicts, deduplicated, newest first.
+    """
+    return await read_events_from_relays(
+        relays, authors=authors, since=since, until=until, limit=limit, kinds=[30017],
+    )
+
+
+def parse_stall(event):
+    """Parse a NIP-15 stall (kind 30017). The stall data is JSON in `content`.
+
+    Returns a dict with at least {id, name, description, currency, shipping,
+    pubkey}, or None if the content isn't valid stall JSON.
+    """
+    try:
+        data = json.loads(event.get("content") or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    tags = event.get("tags") or []
+    d_ident = next(
+        (t[1] for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "d"),
+        None,
+    )
+    return {
+        "id": data.get("id") or d_ident,
+        "name": data.get("name"),
+        "description": data.get("description"),
+        "currency": data.get("currency"),
+        "shipping": data.get("shipping") if isinstance(data.get("shipping"), list) else [],
+        "pubkey": event.get("pubkey"),
+    }
 
 
 # ─── 7. NIP-44 encryption (for NIP-17 DMs) ───────────────────────────────────

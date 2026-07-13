@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='basic-nostr',
-    version='1.1.0',
+    version='1.2.0',
     author="Luke Profits",
     description="An intentionally tiny Nostr library for Python: Keys, DMs, Posts, & Products.",
     long_description=open("README.md").read(),
@@ -17,6 +17,10 @@ setup(
         'cryptography',
         'certifi',
     ],
+    extras_require={
+        # routing relay connections through a proxy (e.g. Tor SOCKS5)
+        'proxy': ['python-socks'],
+    },
     python_requires='>=3.9',
     classifiers=[
         "Programming Language :: Python :: 3",
