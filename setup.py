@@ -18,8 +18,9 @@ setup(
         'certifi',
     ],
     extras_require={
-        # routing relay connections through a proxy (e.g. Tor SOCKS5)
-        'proxy': ['python-socks'],
+        # routing relay connections through a proxy (e.g. Tor SOCKS5);
+        # websockets>=15 is where connect() grew native proxy= support
+        'proxy': ['python-socks[asyncio]', 'websockets>=15'],
     },
     python_requires='>=3.9',
     classifiers=[

@@ -95,7 +95,7 @@ class NostrClient:
     def __init__(self, private_key=None, relay_urls=None, proxy=None):
         self._private_key = private_key
         self._relay_urls = relay_urls
-        self._proxy = proxy  # e.g. "socks5://127.0.0.1:9050" to route via Tor
+        self._proxy = proxy  # e.g. "socks5h://127.0.0.1:9050" to route via Tor
         self._relays = None
 
     # ── Connection lifecycle ────────────────────────────────────────────

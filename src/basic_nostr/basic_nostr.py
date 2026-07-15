@@ -12,8 +12,11 @@ Implements:
   - NIP-99: Classified listings / marketplace (kind 30402)
 
 Relay connections can route through a proxy (e.g. Tor) — pass
-proxy="socks5://127.0.0.1:9050" to NostrClient / connect_to_relays
-(needs the optional `python-socks` package: pip install basic-nostr[proxy]).
+proxy="socks5h://127.0.0.1:9050" to NostrClient / connect_to_relays
+(needs the optional proxy extra: pip install basic-nostr[proxy]).
+Use socks5h:// (not socks5://) so relay hostnames resolve through the
+proxy — no DNS leak, and .onion relays work. Any SOCKS5 URL works:
+system Tor (9050), Tor Browser (9150), or basic_tor.ensure_running().
 
 Install:
   pip install basic-nostr
@@ -337,6 +340,25 @@ def _verify_event_signature(event_dict):
 # ─── 3. Relay connection ─────────────────────────────────────────────────────
 
 
+def _require_proxy_support():
+    """Fail fast with an actionable message if proxy prerequisites are missing.
+
+    Only called when a proxy is requested — the no-proxy path never needs
+    websockets>=15 or python-socks.
+    """
+    hint = 'proxy= requires websockets>=15 and python-socks — pip install "basic-nostr[proxy]"'
+    try:
+        major = int(websockets.__version__.split(".")[0])
+    except (AttributeError, ValueError):
+        major = 0
+    if major < 15:
+        raise ImportError(f"{hint} (found websockets {getattr(websockets, '__version__', '?')})")
+    try:
+        import python_socks  # noqa: F401
+    except ImportError:
+        raise ImportError(f"{hint} (python-socks is not installed)")
+
+
 async def connect_to_relays(relay_urls=None, proxy=None):
     """Connect to Nostr relays via WebSocket.
 
@@ -345,8 +367,9 @@ async def connect_to_relays(relay_urls=None, proxy=None):
 
     Args:
         relay_urls: relay wss:// URLs (defaults to DEFAULT_RELAYS).
-        proxy: optional proxy URL, e.g. "socks5://127.0.0.1:9050" to route
-            every relay connection through Tor. Needs `python-socks`.
+        proxy: optional proxy URL, e.g. "socks5h://127.0.0.1:9050" to route
+            every relay connection through Tor (socks5h = DNS via proxy).
+            Needs the proxy extra: pip install basic-nostr[proxy].
     """
     if relay_urls is None:
         relay_urls = DEFAULT_RELAYS
@@ -361,8 +384,12 @@ async def connect_to_relays(relay_urls=None, proxy=None):
         pass  # Use system certs if certifi not installed
 
     # websockets>=15 has native proxy support (uses python-socks for socks5).
-    # Only pass proxy when set so we don't pick up ambient env proxies.
-    extra = {"proxy": proxy} if proxy else {}
+    # Only pass proxy when set so we don't pick up ambient env proxies —
+    # with proxy=None this is the exact same connect() call as always.
+    extra = {}
+    if proxy:
+        _require_proxy_support()
+        extra["proxy"] = proxy
 
     async def _try_connect(url):
         try:
