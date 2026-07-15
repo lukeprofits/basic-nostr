@@ -4,10 +4,19 @@ Simple Nostr implementation in Python — no Nostr-specific libraries.
 Implements:
   - NIP-01: Core protocol (events, signing, relay communication)
   - NIP-04: Legacy direct messages (AES-encrypted, kind 4)
+  - NIP-09: Event deletion (kind 5) — read_deletions / deletion_targets
+  - NIP-15: Marketplace stalls (kind 30017) — read_stalls / parse_stall
   - NIP-17: Private direct messages (gift-wrapped, NIP-44 encrypted, kind 1059)
   - NIP-19: bech32 key encoding (nsec/npub)
   - NIP-44: Versioned encryption (ChaCha20 + HMAC, used by NIP-17)
   - NIP-99: Classified listings / marketplace (kind 30402)
+
+Relay connections can route through a proxy (e.g. Tor) — pass
+proxy="socks5h://127.0.0.1:9050" to NostrClient / connect_to_relays
+(needs the optional proxy extra: pip install basic-nostr[proxy]).
+Use socks5h:// (not socks5://) so relay hostnames resolve through the
+proxy — no DNS leak, and .onion relays work. Any SOCKS5 URL works:
+system Tor (9050), Tor Browser (9150), or basic_tor.ensure_running().
 
 Install:
   pip install basic-nostr
@@ -296,6 +305,27 @@ def _sign_event(event_dict, private_key_hex):
     return event_dict
 
 
+def verify_event(event):
+    """Fully validate an event from an untrusted relay (NIP-01): recompute its
+    id from [0,pubkey,created_at,kind,tags,content] and confirm it matches,
+    THEN verify the Schnorr signature. Both are needed — checking the sig alone
+    lets an attacker keep a real (id, sig) but swap tags/content. Use this
+    before acting on destructive events like NIP-09 deletions.
+    """
+    try:
+        serialized = json.dumps(
+            [0, event["pubkey"], event["created_at"], event["kind"],
+             event.get("tags", []), event.get("content", "")],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != event.get("id"):
+            return False
+    except (KeyError, TypeError):
+        return False
+    return _verify_event_signature(event)
+
+
 def _verify_event_signature(event_dict):
     """Verify a Nostr event's Schnorr signature. Returns True/False."""
     try:
@@ -310,11 +340,36 @@ def _verify_event_signature(event_dict):
 # ─── 3. Relay connection ─────────────────────────────────────────────────────
 
 
-async def connect_to_relays(relay_urls=None):
+def _require_proxy_support():
+    """Fail fast with an actionable message if proxy prerequisites are missing.
+
+    Only called when a proxy is requested — the no-proxy path never needs
+    websockets>=15 or python-socks.
+    """
+    hint = 'proxy= requires websockets>=15 and python-socks — pip install "basic-nostr[proxy]"'
+    try:
+        major = int(websockets.__version__.split(".")[0])
+    except (AttributeError, ValueError):
+        major = 0
+    if major < 15:
+        raise ImportError(f"{hint} (found websockets {getattr(websockets, '__version__', '?')})")
+    try:
+        import python_socks  # noqa: F401
+    except ImportError:
+        raise ImportError(f"{hint} (python-socks is not installed)")
+
+
+async def connect_to_relays(relay_urls=None, proxy=None):
     """Connect to Nostr relays via WebSocket.
 
     Connects concurrently. Skips relays that fail to connect (logs warning).
     Returns list of (url, websocket) tuples for successful connections.
+
+    Args:
+        relay_urls: relay wss:// URLs (defaults to DEFAULT_RELAYS).
+        proxy: optional proxy URL, e.g. "socks5h://127.0.0.1:9050" to route
+            every relay connection through Tor (socks5h = DNS via proxy).
+            Needs the proxy extra: pip install basic-nostr[proxy].
     """
     if relay_urls is None:
         relay_urls = DEFAULT_RELAYS
@@ -328,9 +383,17 @@ async def connect_to_relays(relay_urls=None):
     except ImportError:
         pass  # Use system certs if certifi not installed
 
+    # websockets>=15 has native proxy support (uses python-socks for socks5).
+    # Only pass proxy when set so we don't pick up ambient env proxies —
+    # with proxy=None this is the exact same connect() call as always.
+    extra = {}
+    if proxy:
+        _require_proxy_support()
+        extra["proxy"] = proxy
+
     async def _try_connect(url):
         try:
-            ws = await websockets.connect(url, ssl=ssl_context)
+            ws = await websockets.connect(url, ssl=ssl_context, **extra)
             return (url, ws)
         except Exception as e:
             print(f"[WARN] Failed to connect to {url}: {e}")
@@ -646,6 +709,89 @@ async def read_products(relays, authors=None, tag_filters=None, since=None, unti
         relays, authors=authors, tag_filters=tag_filters,
         since=since, until=until, limit=limit, kinds=[30402],
     )
+
+
+# ─── 6c. NIP-09 deletions ────────────────────────────────────────────────────
+
+
+async def read_deletions(relays, authors=None, since=None, until=None, limit=100):
+    """Read deletion events (NIP-09, kind 5) from relays.
+
+    A deletion event asks relays/clients to drop the events it references.
+    Use deletion_targets() to read what each one targets.
+
+    Deletions are destructive, so results are signature-verified here —
+    forged/unsigned kind-5 events are dropped. Returns verified kind-5 event
+    dicts, deduplicated, newest first.
+    """
+    events = await read_events_from_relays(
+        relays, authors=authors, since=since, until=until, limit=limit, kinds=[5],
+    )
+    return [e for e in events if verify_event(e)]
+
+
+def deletion_targets(event):
+    """What a NIP-09 deletion event (kind 5) targets.
+
+    Returns a dict:
+        {"pubkey": <author>,
+         "event_ids": [<id>, ...],          # 'e' tags — plain events
+         "addresses": ["<kind>:<pubkey>:<d>", ...]}  # 'a' tags — replaceable
+
+    Only the event's own author may delete their events, so callers should
+    match targets against events by the SAME pubkey.
+    """
+    tags = event.get("tags") or []
+    event_ids = [t[1] for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "e"]
+    addresses = [t[1] for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "a"]
+    return {
+        "pubkey": event.get("pubkey"),
+        "event_ids": event_ids,
+        "addresses": addresses,
+    }
+
+
+# ─── 6d. NIP-15 stalls ───────────────────────────────────────────────────────
+
+
+async def read_stalls(relays, authors=None, since=None, until=None, limit=100):
+    """Read marketplace stall metadata (NIP-15, kind 30017) from relays.
+
+    A stall is a seller's shop: name, currency, and shipping zones that its
+    products (kind 30402/30018) reference by stall id. Use parse_stall().
+
+    Returns: list of kind-30017 event dicts, deduplicated, newest first.
+    """
+    return await read_events_from_relays(
+        relays, authors=authors, since=since, until=until, limit=limit, kinds=[30017],
+    )
+
+
+def parse_stall(event):
+    """Parse a NIP-15 stall (kind 30017). The stall data is JSON in `content`.
+
+    Returns a dict with at least {id, name, description, currency, shipping,
+    pubkey}, or None if the content isn't valid stall JSON.
+    """
+    try:
+        data = json.loads(event.get("content") or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    tags = event.get("tags") or []
+    d_ident = next(
+        (t[1] for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "d"),
+        None,
+    )
+    return {
+        "id": data.get("id") or d_ident,
+        "name": data.get("name"),
+        "description": data.get("description"),
+        "currency": data.get("currency"),
+        "shipping": data.get("shipping") if isinstance(data.get("shipping"), list) else [],
+        "pubkey": event.get("pubkey"),
+    }
 
 
 # ─── 7. NIP-44 encryption (for NIP-17 DMs) ───────────────────────────────────

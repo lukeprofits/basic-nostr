@@ -2,12 +2,15 @@
 A simple way to use NOSTR from Python: Keys, DMs, Posts, & Products.
 
 ## Description
-`basic-nostr` does exactly four things:
+`basic-nostr` does exactly these things:
 
 - Generate Nostr keys
 - Send and read direct messages (in both formats [NIP-04](https://github.com/nostr-protocol/nips/blob/master/04.md) and [NIP-17](https://github.com/nostr-protocol/nips/blob/master/17.md))
 - Post and read [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) notes (kind 1)
 - Post and read [NIP-99](https://github.com/nostr-protocol/nips/blob/master/99.md) products (kind 30402)
+- Read [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletion events (kind 5, signature-verified)
+- Read [NIP-15](https://github.com/nostr-protocol/nips/blob/master/15.md) marketplace stalls (kind 30017)
+- Optionally route all relay connections through a SOCKS5 proxy (e.g. Tor)
 
 I made `basic-nostr` because no other Python packages make it this simple.
 
@@ -76,6 +79,20 @@ for product in products:
     tags = {t[0]: t[1:] for t in product["tags"]}
     print(f"{tags['title'][0]} — {tags['price'][0]} {tags['price'][1]}")
 
+# Read marketplace stalls (NIP-15, kind 30017) — a seller's shop metadata
+from basic_nostr import parse_stall
+for event in nostr.read_stalls(limit=20):
+    stall = parse_stall(event)  # None if the content isn't valid stall JSON
+    if stall:
+        print(f"{stall['name']} ({stall['currency']})")
+
+# Read deletion requests (NIP-09, kind 5) — signature-verified, forged events dropped
+from basic_nostr import deletion_targets
+for event in nostr.read_deletions(limit=50):
+    targets = deletion_targets(event)
+    # only honor deletions of events by the SAME pubkey
+    print(f"{targets['pubkey']} deletes {targets['event_ids']} {targets['addresses']}")
+
 # Close when done (or use context manager below)
 nostr.close()
 ```
@@ -100,6 +117,31 @@ nostr = NostrClient(nsec, relay_urls=["wss://relay.damus.io", "wss://nos.lol"])
 nostr.make_post("Hello from custom relays!")
 ```
 
+### Tor / SOCKS5 proxy (optional)
+
+Route every relay connection through a SOCKS5 proxy. Needs the optional extra:
+
+```bash
+pip install basic-nostr[proxy]
+```
+
+```python
+nostr = NostrClient(nsec, proxy="socks5h://127.0.0.1:9050")
+nostr.make_post("Hello over Tor!")
+```
+
+Any SOCKS5 URL works — system Tor (`9050`), Tor Browser (`9150`), or one you get
+programmatically, e.g. from [`basic-tor`](https://github.com/lukeprofits/basic-tor):
+
+```python
+import basic_tor
+nostr = NostrClient(nsec, proxy=basic_tor.ensure_running())
+```
+
+Use `socks5h://` (not `socks5://`) so relay hostnames resolve *through* the proxy —
+no DNS leak, and `.onion` relays work. Without `proxy=`, nothing changes: no proxy
+dependencies are needed and connections go out directly, same as always.
+
 ### Async API
 
 All async functions are also exported if you need them directly:
@@ -120,7 +162,9 @@ async def main():
 asyncio.run(main())
 ```
 
-Available async functions: `connect_to_relays`, `close_relays`, `make_post`, `read_posts`, `list_product`, `read_products`, `send_dm`, `read_dms`, `read_events_from_relays`.
+Available async functions: `connect_to_relays`, `close_relays`, `make_post`, `read_posts`, `list_product`, `read_products`, `read_deletions`, `read_stalls`, `send_dm`, `read_dms`, `read_events_from_relays`.
+
+Sync helpers (no relay connection needed): `deletion_targets` (what a kind-5 event deletes), `parse_stall` (parse kind-30017 content), `verify_event` (full NIP-01 validation: recomputes the event id **and** checks the Schnorr signature — `read_deletions` already applies it).
 
 
 ## Contributing
