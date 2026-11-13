@@ -393,7 +393,9 @@ async def connect_to_relays(relay_urls=None, proxy=None):
 
     async def _try_connect(url):
         try:
-            ws = await websockets.connect(url, ssl=ssl_context, **extra)
+            # ws:// (a relay on this machine, or a .onion) has no TLS to check
+            tls = {"ssl": ssl_context} if url.startswith("wss://") else {}
+            ws = await websockets.connect(url, **tls, **extra)
             return (url, ws)
         except Exception as e:
             print(f"[WARN] Failed to connect to {url}: {e}")
@@ -660,6 +662,158 @@ async def read_events_from_relays(
     # Sort newest first
     deduped.sort(key=lambda e: e.get("created_at", 0), reverse=True)
     return deduped
+
+
+# ─── 6a. Any kind of event, and hearing events as they arrive ───────────────
+
+
+async def publish_event(relays, private_key, kind, content, tags=None):
+    """Publish one event of any kind to relays.
+
+    Args:
+        relays: List of (url, ws) tuples from connect_to_relays()
+        private_key: Your nsec1... key (or hex)
+        kind: The event kind, e.g. 1 for a note, 30078 for app data
+        content: The event's content, a string
+        tags: List of tag arrays, e.g. [["t", "weather"]]
+
+    Returns:
+        (event_dict, relay_responses)
+    """
+    privkey_hex = _privkey_to_hex(private_key)
+    pubkey_hex = _pubkey_hex_from_privkey_hex(privkey_hex)
+    event = _build_event(pubkey_hex, kind=kind, content=content, tags=tags or [])
+    _sign_event(event, privkey_hex)
+    responses = await _send_to_relays(relays, ["EVENT", event])
+    return event, responses
+
+
+def _matches(event, filt):
+    """Does `event` fit the filter we asked a relay for? Relays are not trusted
+    to have applied it."""
+    try:
+        if "kinds" in filt and event["kind"] not in filt["kinds"]:
+            return False
+        if "authors" in filt and event["pubkey"] not in filt["authors"]:
+            return False
+        if "since" in filt and event["created_at"] < filt["since"]:
+            return False
+        for key, wanted in filt.items():
+            if key.startswith("#"):
+                have = {t[1] for t in event["tags"] if len(t) > 1 and t[0] == key[1:]}
+                if not have.intersection(wanted):
+                    return False
+    except (KeyError, TypeError):
+        return False
+    return True
+
+
+#: How many event IDs listen() remembers, to pass each event on once.
+LISTEN_REMEMBERS = 10_000
+
+
+async def listen(
+    relay_urls,
+    on_event,
+    kinds=None,
+    authors=None,
+    tag_filters=None,
+    since=None,
+    proxy=None,
+):
+    """Hear matching events as they arrive, until cancelled.
+
+    Opens its own connection to each relay and keeps it: a relay that drops
+    is tried again, a little later each time, for as long as this runs. Every
+    event is fully verified (verify_event) and checked against the filter
+    before `on_event(event)` is called, and an event that arrives from
+    several relays is passed on once.
+
+    Args:
+        relay_urls: relay wss:// URLs (defaults to DEFAULT_RELAYS)
+        on_event: called with each event dict. Keep it quick: it runs on the
+            event loop. (NostrClient.listen calls yours on its own thread.)
+        kinds, authors, tag_filters: as for read_events_from_relays
+        since: unix timestamp to start from. Defaults to now: new events only.
+        proxy: as for connect_to_relays
+
+    Runs until its task is cancelled.
+    """
+    if relay_urls is None:
+        relay_urls = DEFAULT_RELAYS
+    filt = {}
+    if authors:
+        filt["authors"] = [_pubkey_to_hex(a) for a in authors]
+    if kinds:
+        filt["kinds"] = list(kinds)
+    if tag_filters:
+        for letter, values in tag_filters.items():
+            filt[f"#{letter}"] = [
+                _pubkey_to_hex(v) if v.startswith("npub1") else v for v in values
+            ]
+    filt["since"] = int(time.time()) if since is None else since
+
+    ssl_context = ssl.create_default_context()
+    try:
+        import certifi
+
+        ssl_context.load_verify_locations(certifi.where())
+    except ImportError:
+        pass
+    extra = {}
+    if proxy:
+        _require_proxy_support()
+        extra["proxy"] = proxy
+
+    seen = {}  # event id -> None, oldest first
+
+    def _pass_on(event):
+        eid = event.get("id") if isinstance(event, dict) else None
+        if not eid or eid in seen:
+            return
+        if not _matches(event, filt) or not verify_event(event):
+            return
+        seen[eid] = None
+        while len(seen) > LISTEN_REMEMBERS:
+            del seen[next(iter(seen))]
+        try:
+            on_event(event)
+        except Exception as e:
+            print(f"[WARN] on_event raised: {e}")
+
+    async def _one_relay(url):
+        wait = 1.0
+        sub_id = secrets.token_hex(8)
+        while True:
+            try:
+                kwargs = dict(extra)
+                if url.startswith("wss://"):
+                    kwargs["ssl"] = ssl_context
+                async with websockets.connect(url, **kwargs) as ws:
+                    await ws.send(json.dumps(["REQ", sub_id, filt]))
+                    wait = 1.0
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if (
+                            isinstance(msg, list)
+                            and len(msg) >= 3
+                            and msg[0] == "EVENT"
+                            and msg[1] == sub_id
+                        ):
+                            _pass_on(msg[2])
+                        elif isinstance(msg, list) and msg and msg[0] == "CLOSED":
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # dropped or unreachable: try again below
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, 60.0)
+
+    await asyncio.gather(*[_one_relay(url) for url in relay_urls])
 
 
 # ─── 6b. Convenience readers ─────────────────────────────────────────────────

@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='basic-nostr',
-    version='1.2.0',
+    version='1.3.0',
     author="Luke Profits",
     description="An intentionally tiny Nostr library for Python: Keys, DMs, Posts, & Products.",
     long_description=open("README.md").read(),

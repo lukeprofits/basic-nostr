@@ -117,6 +117,27 @@ nostr = NostrClient(nsec, relay_urls=["wss://relay.damus.io", "wss://nos.lol"])
 nostr.make_post("Hello from custom relays!")
 ```
 
+### Any kind of event, and hearing events live
+
+`publish` sends an event of any kind; `listen` calls your function for every
+matching event from now on, until you stop it.
+
+```python
+def heard(event):
+    print(event["content"])
+
+stop = nostr.listen(heard, kinds=[20078], tag_filters={"t": ["weather"]})
+
+nostr.publish(20078, "rain", tags=[["t", "weather"]])
+
+stop()   # or nostr.close(), which stops every listener
+```
+
+Events are signature-verified and checked against your filter before you see
+them, and an event that several relays send reaches you once. A relay that
+drops is rejoined automatically. Your function runs on its own thread, so it
+may take its time and may use the client.
+
 ### Tor / SOCKS5 proxy (optional)
 
 Route every relay connection through a SOCKS5 proxy. Needs the optional extra:
@@ -162,7 +183,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Available async functions: `connect_to_relays`, `close_relays`, `make_post`, `read_posts`, `list_product`, `read_products`, `read_deletions`, `read_stalls`, `send_dm`, `read_dms`, `read_events_from_relays`.
+Available async functions: `connect_to_relays`, `close_relays`, `make_post`, `read_posts`, `list_product`, `read_products`, `read_deletions`, `read_stalls`, `send_dm`, `read_dms`, `read_events_from_relays`, `publish_event`, `listen`.
 
 Sync helpers (no relay connection needed): `deletion_targets` (what a kind-5 event deletes), `parse_stall` (parse kind-30017 content), `verify_event` (full NIP-01 validation: recomputes the event id **and** checks the Schnorr signature — `read_deletions` already applies it).
 

@@ -15,6 +15,7 @@ Usage:
 
 import asyncio
 import atexit
+import queue
 import threading
 
 from . import basic_nostr as _async
@@ -97,6 +98,7 @@ class NostrClient:
         self._relay_urls = relay_urls
         self._proxy = proxy  # e.g. "socks5h://127.0.0.1:9050" to route via Tor
         self._relays = None
+        self._listening = []  # stop functions of listeners still running
 
     # ── Connection lifecycle ────────────────────────────────────────────
 
@@ -108,6 +110,8 @@ class NostrClient:
 
     def close(self):
         """Close all relay connections. Called automatically by __exit__."""
+        for stop in list(self._listening):
+            stop()
         if self._relays:
             _run(_async.close_relays(self._relays))
             self._relays = None
@@ -162,6 +166,73 @@ class NostrClient:
             self.relays, self.private_key, recipient_pubkey,
             message, protocol=protocol,
         ))
+
+    def publish(self, kind, content, tags=None):
+        """Publish one event of any kind to connected relays."""
+        return _run(_async.publish_event(
+            self.relays, self.private_key, kind, content, tags or []
+        ))
+
+    # ── Hearing events as they arrive ────────────────────────────────────
+
+    def listen(self, on_event, kinds=None, authors=None, tag_filters=None,
+               since=None, backlog=1000):
+        """Call on_event(event) for every matching event from now on.
+
+        Returns a function; call it to stop. close() stops every listener.
+
+        Events are verified, and one that several relays send is passed on
+        once. on_event runs on a thread of its own, so it may take its time
+        and may use this client. If it falls more than `backlog` events
+        behind, the newest are dropped.
+        """
+        events = queue.Queue(maxsize=backlog)
+        done = object()
+
+        def _take(event):
+            try:
+                events.put_nowait(event)
+            except queue.Full:
+                pass
+
+        def _work():
+            while True:
+                event = events.get()
+                if event is done:
+                    return
+                try:
+                    on_event(event)
+                except Exception as e:
+                    print(f"[WARN] on_event raised: {e}")
+
+        worker = threading.Thread(
+            target=_work, daemon=True, name="basic_nostr_listener"
+        )
+        worker.start()
+        task = asyncio.run_coroutine_threadsafe(
+            _async.listen(
+                self._relay_urls, _take, kinds=kinds, authors=authors,
+                tag_filters=tag_filters, since=since, proxy=self._proxy,
+            ),
+            _get_loop(),
+        )
+
+        def stop():
+            if stop in self._listening:
+                self._listening.remove(stop)
+                task.cancel()
+                while True:  # make room for the marker if the queue is full
+                    try:
+                        events.put_nowait(done)
+                        return
+                    except queue.Full:
+                        try:
+                            events.get_nowait()
+                        except queue.Empty:
+                            pass
+
+        self._listening.append(stop)
+        return stop
 
     # ── Read operations ──────────────────────────────────────────────────
 

@@ -16,6 +16,8 @@ from .basic_nostr import (
     send_dm,
     read_dms,
     read_events_from_relays,
+    publish_event,
+    listen,
     DEFAULT_RELAYS,
 )
 from .client import NostrClient
