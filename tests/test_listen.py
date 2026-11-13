@@ -198,8 +198,9 @@ def test_a_dropped_relay_is_joined_again(relays, pair):
     for relay in relays:
         relay.drop_everyone()
     assert until(lambda: all(r.listeners() == 1 for r in relays), 15)
-    speaker.close()  # its connections were dropped too
-    speaker.publish(20078, "back")
+    # the speaker's connections were dropped too, and it makes new ones
+    _, responses = speaker.publish(20078, "back")
+    assert all(r[1][0] == "OK" for r in responses)
     assert until(lambda: heard)
 
 

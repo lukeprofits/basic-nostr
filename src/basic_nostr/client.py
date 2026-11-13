@@ -168,10 +168,28 @@ class NostrClient:
         ))
 
     def publish(self, kind, content, tags=None):
-        """Publish one event of any kind to connected relays."""
-        return _run(_async.publish_event(
+        """Publish one event of any kind to connected relays.
+
+        A relay whose connection has dropped is reconnected: at once if
+        none took the event, otherwise before the next call.
+        """
+        def lost(responses):
+            return [r for _, r in responses if r and r[0] == "ERROR"]
+
+        event, responses = _run(_async.publish_event(
             self.relays, self.private_key, kind, content, tags or []
         ))
+        if lost(responses):
+            everyone = len(lost(responses)) == len(responses)
+            self._drop_connections()
+            if everyone:
+                responses = _run(_async._send_to_relays(self.relays, ["EVENT", event]))
+        return event, responses
+
+    def _drop_connections(self):
+        if self._relays:
+            _run(_async.close_relays(self._relays))
+            self._relays = None
 
     # ── Hearing events as they arrive ────────────────────────────────────
 
