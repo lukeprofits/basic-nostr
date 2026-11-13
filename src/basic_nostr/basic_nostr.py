@@ -667,7 +667,29 @@ async def read_events_from_relays(
 # ─── 6a. Any kind of event, and hearing events as they arrive ───────────────
 
 
-async def publish_event(relays, private_key, kind, content, tags=None):
+async def _send_without_waiting(relays, message):
+    """Send to all relays and return at once: ["SENT"] or ["ERROR", why] each.
+
+    Whatever the relays have already said back is read and dropped, so that
+    answers nobody is waiting for do not pile up on the connection.
+    """
+    msg_str = json.dumps(message)
+
+    async def _send_one(url, ws):
+        try:
+            await ws.send(msg_str)
+            while True:
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=0.01)
+                except asyncio.TimeoutError:
+                    return (url, ["SENT"])
+        except Exception as e:
+            return (url, ["ERROR", str(e)])
+
+    return await asyncio.gather(*[_send_one(url, ws) for url, ws in relays])
+
+
+async def publish_event(relays, private_key, kind, content, tags=None, wait=True):
     """Publish one event of any kind to relays.
 
     Args:
@@ -676,6 +698,9 @@ async def publish_event(relays, private_key, kind, content, tags=None):
         kind: The event kind, e.g. 1 for a note, 30078 for app data
         content: The event's content, a string
         tags: List of tag arrays, e.g. [["t", "weather"]]
+        wait: True waits for each relay to say it took the event (up to 5 s
+            each). False sends and returns at once, for many small events
+            where one going missing does not matter.
 
     Returns:
         (event_dict, relay_responses)
@@ -684,7 +709,8 @@ async def publish_event(relays, private_key, kind, content, tags=None):
     pubkey_hex = _pubkey_hex_from_privkey_hex(privkey_hex)
     event = _build_event(pubkey_hex, kind=kind, content=content, tags=tags or [])
     _sign_event(event, privkey_hex)
-    responses = await _send_to_relays(relays, ["EVENT", event])
+    send = _send_to_relays if wait else _send_without_waiting
+    responses = await send(relays, ["EVENT", event])
     return event, responses
 
 

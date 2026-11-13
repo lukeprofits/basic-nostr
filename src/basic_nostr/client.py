@@ -171,8 +171,11 @@ class NostrClient:
             message, protocol=protocol,
         ))
 
-    def publish(self, kind, content, tags=None):
+    def publish(self, kind, content, tags=None, wait=True):
         """Publish one event of any kind to connected relays.
+
+        `wait=False` sends and returns at once instead of waiting for each
+        relay to say it took the event.
 
         A relay whose connection has dropped is reconnected: at once if
         none took the event, otherwise before the next call.
@@ -181,13 +184,14 @@ class NostrClient:
             return [r for _, r in responses if r and r[0] == "ERROR"]
 
         event, responses = _run(_async.publish_event(
-            self.relays, self.private_key, kind, content, tags or []
+            self.relays, self.private_key, kind, content, tags or [], wait=wait
         ))
         if lost(responses):
             everyone = len(lost(responses)) == len(responses)
             self._drop_connections()
             if everyone:
-                responses = _run(_async._send_to_relays(self.relays, ["EVENT", event]))
+                send = _async._send_to_relays if wait else _async._send_without_waiting
+                responses = _run(send(self.relays, ["EVENT", event]))
         return event, responses
 
     def _drop_connections(self):

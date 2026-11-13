@@ -208,6 +208,22 @@ def test_a_dropped_relay_is_joined_again(relays, pair):
     assert until(lambda: heard)
 
 
+def test_publishing_without_waiting_is_heard_all_the_same(relays, pair):
+    speaker, hearer = pair
+    heard = []
+    hearer.listen(heard.append, kinds=[20078])
+    assert until(lambda: all(r.listeners() == 1 for r in relays))
+    started = time.time()
+    for n in range(40):
+        _, responses = speaker.publish(20078, str(n), wait=False)
+        assert all(r[1] == ["SENT"] for r in responses)
+    assert time.time() - started < 5
+    assert until(lambda: len(heard) == 40)
+    # and the connection is still good for a call that does wait
+    _, responses = speaker.publish(20078, "last")
+    assert all(r[1][0] == "OK" for r in responses)
+
+
 def test_reading_after_the_relays_dropped_connects_again(relays, pair):
     speaker, hearer = pair
     kept, _ = speaker.publish(30078, "kept", tags=[["d", "x"]])

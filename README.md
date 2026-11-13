@@ -138,6 +138,10 @@ them, and an event that several relays send reaches you once. A relay that
 drops is rejoined automatically. Your function runs on its own thread, so it
 may take its time and may use the client.
 
+`publish(..., wait=False)` sends and returns at once instead of waiting for
+each relay to confirm, for many small events where one going missing does not
+matter.
+
 ### Tor / SOCKS5 proxy (optional)
 
 Route every relay connection through a SOCKS5 proxy. Needs the optional extra:
