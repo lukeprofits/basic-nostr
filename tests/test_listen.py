@@ -22,6 +22,7 @@ class Relay:
 
     def __init__(self):
         self.subs = {}  # websocket -> {sub id: filter}
+        self.kept = []  # events a REQ is answered with
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -58,6 +59,9 @@ class Relay:
                 msg = json.loads(raw)
                 if msg[0] == "REQ":
                     self.subs[ws][msg[1]] = msg[2]
+                    for event in self.kept:
+                        if self._fits(event, msg[2]):
+                            await ws.send(json.dumps(["EVENT", msg[1], event]))
                     await ws.send(json.dumps(["EOSE", msg[1]]))
                 elif msg[0] == "CLOSE":
                     self.subs[ws].pop(msg[1], None)
@@ -202,6 +206,18 @@ def test_a_dropped_relay_is_joined_again(relays, pair):
     _, responses = speaker.publish(20078, "back")
     assert all(r[1][0] == "OK" for r in responses)
     assert until(lambda: heard)
+
+
+def test_reading_after_the_relays_dropped_connects_again(relays, pair):
+    speaker, hearer = pair
+    kept, _ = speaker.publish(30078, "kept", tags=[["d", "x"]])
+    for relay in relays:
+        relay.kept = [kept]
+    assert [e["id"] for e in hearer.read_events(kinds=[30078])] == [kept["id"]]
+    for relay in relays:
+        relay.drop_everyone()
+    assert until(lambda: all(ws.close_code is not None for _, ws in hearer._relays))
+    assert [e["id"] for e in hearer.read_events(kinds=[30078])] == [kept["id"]]
 
 
 def test_the_callback_may_take_its_time_and_use_the_client(relays, pair):

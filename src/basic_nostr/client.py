@@ -128,6 +128,10 @@ class NostrClient:
 
     @property
     def relays(self):
+        # A relay whose connection has closed since the last call is
+        # connected to again, so a long-lived client keeps working.
+        if self._relays and any(ws.close_code is not None for _, ws in self._relays):
+            self._drop_connections()
         if self._relays is None:
             self.connect()
         return self._relays
