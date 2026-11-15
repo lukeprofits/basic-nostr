@@ -48,10 +48,26 @@ def _get_loop():
     return _loop
 
 
+async def _cancel_everything():
+    here = asyncio.current_task()
+    tasks = [t for t in asyncio.all_tasks() if t is not here]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def _shutdown_loop():
-    """Clean shutdown: stop the loop and join the thread."""
+    """Clean shutdown: end what is still running on the loop -- listeners,
+    open connections -- then stop the loop and join the thread. Stopped
+    with work still pending, the loop would leave it to be torn down by the
+    interpreter on its way out, loudly."""
     global _loop, _thread
     if _loop is not None and not _loop.is_closed():
+        if _loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(_cancel_everything(), _loop).result(5)
+            except Exception:
+                pass
         _loop.call_soon_threadsafe(_loop.stop)
         if _thread is not None:
             _thread.join(timeout=5)
@@ -229,7 +245,7 @@ class NostrClient:
                 try:
                     on_event(event)
                 except Exception as e:
-                    print(f"[WARN] on_event raised: {e}")
+                    _async.logger.warning("on_event raised: %s", e)
 
         worker = threading.Thread(
             target=_work, daemon=True, name="basic_nostr_listener"

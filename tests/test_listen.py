@@ -269,3 +269,59 @@ def test_a_callback_that_raises_does_not_end_the_listening(relays, pair):
     speaker.publish(20078, "bad")
     speaker.publish(20078, "good")
     assert until(lambda: heard == ["good"])
+
+
+def test_nothing_is_written_to_the_programs_output(relays, pair, capsys, caplog):
+    import logging
+
+    a, _b = pair
+    caplog.set_level(logging.INFO, logger="basic_nostr")
+    stop = a.listen(lambda event: None, kinds=[1])
+    a.publish(1, "hello")
+    stop()
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+    assert any("connected to" in r.getMessage() for r in caplog.records)
+
+
+def test_shutting_down_the_loop_ends_listeners_quietly():
+    """A program that exits with a listener open is not told about it."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import asyncio, threading, websockets
+        from basic_nostr import NostrClient, make_keys
+
+        async def relay(ws):
+            async for _ in ws:
+                pass
+
+        ready = threading.Event()
+        def serve():
+            async def main():
+                async with websockets.serve(relay, "127.0.0.1", 0) as server:
+                    global port
+                    port = server.sockets[0].getsockname()[1]
+                    ready.set()
+                    await asyncio.Future()
+            asyncio.run(main())
+        threading.Thread(target=serve, daemon=True).start()
+        ready.wait(10)
+        _, nsec = make_keys()
+        client = NostrClient(nsec, relay_urls=[f"ws://127.0.0.1:{port}"])
+        client.listen(lambda event: None, kinds=[1])
+        """
+    )
+    import os
+
+    env = dict(os.environ, PYTHONPATH=os.path.join(os.path.dirname(__file__), "..", "src"))
+    done = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60, env=env
+    )
+    assert done.returncode == 0, done.stderr
+    assert "Task was destroyed" not in done.stderr
+    assert "Event loop is closed" not in done.stderr
+    assert "no running event loop" not in done.stderr

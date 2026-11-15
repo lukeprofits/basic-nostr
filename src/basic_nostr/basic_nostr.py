@@ -39,6 +39,7 @@ import base64
 import hashlib
 import hmac as hmac_module
 import json
+import logging
 import math
 import secrets
 import ssl
@@ -46,6 +47,10 @@ import time
 import uuid
 
 import websockets
+
+# A library does not write to its program's output: what it has to say goes
+# to this logger, which the program shows or not as it likes.
+logger = logging.getLogger("basic_nostr")
 from bech32 import bech32_encode, bech32_decode, convertbits
 from coincurve import PrivateKey, PublicKeyXOnly
 from cryptography.hazmat.primitives import hashes
@@ -398,7 +403,7 @@ async def connect_to_relays(relay_urls=None, proxy=None):
             ws = await websockets.connect(url, **tls, **extra)
             return (url, ws)
         except Exception as e:
-            print(f"[WARN] Failed to connect to {url}: {e}")
+            logger.warning("failed to connect to %s: %s", url, e)
             return None
 
     results = await asyncio.gather(*[_try_connect(url) for url in relay_urls])
@@ -407,7 +412,7 @@ async def connect_to_relays(relay_urls=None, proxy=None):
     if not relays:
         raise ConnectionError("Could not connect to any relay")
 
-    print(f"Connected to {len(relays)} relay(s): {[r[0] for r in relays]}")
+    logger.info("connected to %d relay(s): %s", len(relays), [r[0] for r in relays])
     return relays
 
 
@@ -637,7 +642,7 @@ async def read_events_from_relays(
         except asyncio.TimeoutError:
             pass
         except Exception as e:
-            print(f"[WARN] Error reading from {url}: {e}")
+            logger.warning("error reading from %s: %s", url, e)
         finally:
             try:
                 await ws.send(json.dumps(["CLOSE", sub_id]))
@@ -805,7 +810,7 @@ async def listen(
         try:
             on_event(event)
         except Exception as e:
-            print(f"[WARN] on_event raised: {e}")
+            logger.warning("on_event raised: %s", e)
 
     async def _one_relay(url):
         wait = 1.0
