@@ -10,6 +10,7 @@ A simple way to use NOSTR from Python: Keys, DMs, Posts, & Products.
 - Post and read [NIP-99](https://github.com/nostr-protocol/nips/blob/master/99.md) products (kind 30402)
 - Read [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletion events (kind 5, signature-verified)
 - Read [NIP-15](https://github.com/nostr-protocol/nips/blob/master/15.md) marketplace stalls (kind 30017)
+- Publish an event of any kind, and listen for matching events as they arrive
 - Optionally route all relay connections through a SOCKS5 proxy (e.g. Tor)
 
 I made `basic-nostr` because no other Python packages make it this simple.
@@ -151,7 +152,7 @@ the `basic_nostr` logger, so your program decides whether to show them
 Route every relay connection through a SOCKS5 proxy. Needs the optional extra:
 
 ```bash
-pip install basic-nostr[proxy]
+pip install "basic-nostr[proxy]"
 ```
 
 ```python
@@ -193,7 +194,7 @@ asyncio.run(main())
 
 Available async functions: `connect_to_relays`, `close_relays`, `make_post`, `read_posts`, `list_product`, `read_products`, `read_deletions`, `read_stalls`, `send_dm`, `read_dms`, `read_events_from_relays`, `publish_event`, `listen`.
 
-Sync helpers (no relay connection needed): `deletion_targets` (what a kind-5 event deletes), `parse_stall` (parse kind-30017 content), `verify_event` (full NIP-01 validation: recomputes the event id **and** checks the Schnorr signature — `read_deletions` already applies it).
+Sync helpers (no relay connection needed): `keys_from_nsec` (the npub/nsec pair for an existing nsec), `deletion_targets` (what a kind-5 event deletes), `parse_stall` (parse kind-30017 content), `verify_event` (full NIP-01 validation: recomputes the event id **and** checks the Schnorr signature — `read_deletions` already applies it).
 
 
 ## Contributing
