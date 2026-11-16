@@ -142,6 +142,10 @@ may take its time and may use the client.
 each relay to confirm, for many small events where one going missing does not
 matter.
 
+Since 1.3 the library prints nothing: connection warnings and the like go to
+the `basic_nostr` logger, so your program decides whether to show them
+(`logging.basicConfig(level=logging.INFO)` shows them all).
+
 ### Tor / SOCKS5 proxy (optional)
 
 Route every relay connection through a SOCKS5 proxy. Needs the optional extra:

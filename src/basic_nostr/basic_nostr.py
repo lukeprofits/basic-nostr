@@ -47,10 +47,6 @@ import time
 import uuid
 
 import websockets
-
-# A library does not write to its program's output: what it has to say goes
-# to this logger, which the program shows or not as it likes.
-logger = logging.getLogger("basic_nostr")
 from bech32 import bech32_encode, bech32_decode, convertbits
 from coincurve import PrivateKey, PublicKeyXOnly
 from cryptography.hazmat.primitives import hashes
@@ -58,6 +54,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers import Cipher
 from cryptography.hazmat.primitives.ciphers.algorithms import ChaCha20
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+
+# A library does not write to its program's output: what it has to say goes
+# to this logger, which the program shows or not as it likes.
+logger = logging.getLogger("basic_nostr")
 
 # ─── Default relays ──────────────────────────────────────────────────────────
 
@@ -839,8 +839,9 @@ async def listen(
                             break
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass  # dropped or unreachable: try again below
+            except Exception as e:
+                # dropped or unreachable: try again below
+                logger.debug("relay %s: %s; again in %.0f s", url, e, wait)
             await asyncio.sleep(wait)
             wait = min(wait * 2, 60.0)
 
