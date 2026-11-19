@@ -15,8 +15,10 @@ Usage:
 
 import asyncio
 import atexit
+import functools
 import queue
 import threading
+import time
 
 from . import basic_nostr as _async
 
@@ -76,6 +78,16 @@ def _shutdown_loop():
         _thread = None
 
 
+def _one_at_a_time(method):
+    """Run a client method holding its lock (see NostrClient._serial)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._serial:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 def _run(coro):
     """Submit a coroutine to the background loop and block until done."""
     loop = _get_loop()
@@ -110,6 +122,9 @@ class NostrClient:
     """
 
     def __init__(self, private_key=None, relay_urls=None, proxy=None):
+        #: one call at a time on the shared connections: two at once would
+        #: both read the same socket and take each other's answers
+        self._serial = threading.RLock()
         self._private_key = private_key
         self._relay_urls = relay_urls
         self._proxy = proxy  # e.g. "socks5h://127.0.0.1:9050" to route via Tor
@@ -118,12 +133,14 @@ class NostrClient:
 
     # ── Connection lifecycle ────────────────────────────────────────────
 
+    @_one_at_a_time
     def connect(self, relay_urls=None):
         """Connect to relays. Called automatically on first use."""
         urls = relay_urls or self._relay_urls
         self._relays = _run(_async.connect_to_relays(urls, proxy=self._proxy))
         return self
 
+    @_one_at_a_time
     def close(self):
         """Close all relay connections. Called automatically by __exit__."""
         for stop in list(self._listening):
@@ -163,12 +180,14 @@ class NostrClient:
 
     # ── Write operations ─────────────────────────────────────────────────
 
+    @_one_at_a_time
     def make_post(self, content, tags=None):
         """Publish a text post (kind 1) to connected relays."""
         return _run(_async.make_post(
             self.relays, content, tags or [], self.private_key
         ))
 
+    @_one_at_a_time
     def list_product(self, title, description, price, currency, image_urls,
                      categories=None, location=None, shipping=None,
                      quantity=None, condition=None, product_id=None):
@@ -180,6 +199,7 @@ class NostrClient:
             condition=condition, product_id=product_id,
         ))
 
+    @_one_at_a_time
     def send_dm(self, recipient_pubkey, message, protocol="nip17"):
         """Send an encrypted direct message."""
         return _run(_async.send_dm(
@@ -187,6 +207,7 @@ class NostrClient:
             message, protocol=protocol,
         ))
 
+    @_one_at_a_time
     def publish(self, kind, content, tags=None, wait=True):
         """Publish one event of any kind to connected relays.
 
@@ -197,7 +218,11 @@ class NostrClient:
         none took the event, otherwise before the next call.
         """
         def lost(responses):
-            return [r for _, r in responses if r and r[0] == "ERROR"]
+            # a connection that failed, not a relay that was merely slow
+            return [
+                r for _, r in responses
+                if r and r[0] == "ERROR" and r[1:] != ["timeout waiting for OK"]
+            ]
 
         event, responses = _run(_async.publish_event(
             self.relays, self.private_key, kind, content, tags or [], wait=wait
@@ -218,15 +243,21 @@ class NostrClient:
     # ── Hearing events as they arrive ────────────────────────────────────
 
     def listen(self, on_event, kinds=None, authors=None, tag_filters=None,
-               since=None, backlog=1000):
+               since=None, backlog=1000, ready_s=10.0):
         """Call on_event(event) for every matching event from now on.
 
         Returns a function; call it to stop. close() stops every listener.
 
         Events are verified, and one that several relays send is passed on
         once. on_event runs on a thread of its own, so it may take its time
-        and may use this client. If it falls more than `backlog` events
-        behind, the newest are dropped.
+        and may use this client: its calls wait for any other call in
+        progress. If it falls more than `backlog` events behind, the newest
+        are dropped.
+
+        Returns once a relay has the subscription (or after `ready_s`
+        seconds if none can be reached yet: it keeps trying), so what is
+        published after this is heard. A filter that cannot be used -- a mistyped npub, a proxy
+        without its extra installed -- raises here.
         """
         events = queue.Queue(maxsize=backlog)
         done = object()
@@ -251,13 +282,21 @@ class NostrClient:
             target=_work, daemon=True, name="basic_nostr_listener"
         )
         worker.start()
+        ready = threading.Event()
         task = asyncio.run_coroutine_threadsafe(
             _async.listen(
                 self._relay_urls, _take, kinds=kinds, authors=authors,
                 tag_filters=tag_filters, since=since, proxy=self._proxy,
+                on_ready=ready.set,
             ),
             _get_loop(),
         )
+        deadline = time.monotonic() + ready_s
+        while not ready.wait(0.05) and time.monotonic() < deadline:
+            if task.done():
+                events.put(done)
+                task.result()  # raises what stopped it before it began
+                break
 
         def stop():
             if stop in self._listening:
@@ -278,6 +317,7 @@ class NostrClient:
 
     # ── Read operations ──────────────────────────────────────────────────
 
+    @_one_at_a_time
     def read_posts(self, authors=None, tag_filters=None,
                    since=None, until=None, limit=100):
         """Read text posts (kind 1) from connected relays."""
@@ -286,6 +326,7 @@ class NostrClient:
             since=since, until=until, limit=limit,
         ))
 
+    @_one_at_a_time
     def read_products(self, authors=None, tag_filters=None,
                       since=None, until=None, limit=100):
         """Read product listings (kind 30402) from connected relays."""
@@ -294,18 +335,21 @@ class NostrClient:
             since=since, until=until, limit=limit,
         ))
 
+    @_one_at_a_time
     def read_deletions(self, authors=None, since=None, until=None, limit=100):
         """Read NIP-09 deletion events (kind 5). See deletion_targets()."""
         return _run(_async.read_deletions(
             self.relays, authors=authors, since=since, until=until, limit=limit,
         ))
 
+    @_one_at_a_time
     def read_stalls(self, authors=None, since=None, until=None, limit=100):
         """Read NIP-15 stall metadata (kind 30017). See parse_stall()."""
         return _run(_async.read_stalls(
             self.relays, authors=authors, since=since, until=until, limit=limit,
         ))
 
+    @_one_at_a_time
     def read_dms(self, since=None, limit=50, protocol="both"):
         """Read and decrypt incoming DMs."""
         return _run(_async.read_dms(
@@ -313,6 +357,7 @@ class NostrClient:
             limit=limit, protocol=protocol,
         ))
 
+    @_one_at_a_time
     def read_events(self, authors=None, tag_filters=None,
                     since=None, until=None, limit=100, kinds=None):
         """Read arbitrary events from connected relays."""

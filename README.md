@@ -137,7 +137,12 @@ stop()   # or nostr.close(), which stops every listener
 Events are signature-verified and checked against your filter before you see
 them, and an event that several relays send reaches you once. A relay that
 drops is rejoined automatically. Your function runs on its own thread, so it
-may take its time and may use the client.
+may take its time and may use the client: the client does one thing at a time,
+from any number of threads. `listen` returns once the relays have the
+subscription (up to `ready_s`, 10 s, if none answers yet), so what you publish
+straight after is heard -- including ephemeral kinds such as 20078, which a
+relay passes to whoever is listening and does not keep. A filter it cannot use,
+such as a mistyped npub, raises from `listen` itself.
 
 `publish(..., wait=False)` sends and returns at once instead of waiting for
 each relay to confirm, for many small events where one going missing does not

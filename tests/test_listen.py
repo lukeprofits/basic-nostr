@@ -23,6 +23,7 @@ class Relay:
     def __init__(self):
         self.subs = {}  # websocket -> {sub id: filter}
         self.kept = []  # events a REQ is answered with
+        self.ok_delay = 0.0  # seconds before answering OK: a relay far away
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -66,6 +67,8 @@ class Relay:
                 elif msg[0] == "CLOSE":
                     self.subs[ws].pop(msg[1], None)
                 elif msg[0] == "EVENT":
+                    if self.ok_delay:
+                        await asyncio.sleep(self.ok_delay)
                     await ws.send(json.dumps(["OK", msg[1]["id"], True, ""]))
                     await self._fan_out(msg[1], honest=True)
         finally:
@@ -312,7 +315,7 @@ def test_shutting_down_the_loop_ends_listeners_quietly():
         ready.wait(10)
         _, nsec = make_keys()
         client = NostrClient(nsec, relay_urls=[f"ws://127.0.0.1:{port}"])
-        client.listen(lambda event: None, kinds=[1])
+        client.listen(lambda event: None, kinds=[1], ready_s=0.5)  # this relay sends no EOSE
         """
     )
     import os
@@ -325,3 +328,51 @@ def test_shutting_down_the_loop_ends_listeners_quietly():
     assert "Task was destroyed" not in done.stderr
     assert "Event loop is closed" not in done.stderr
     assert "no running event loop" not in done.stderr
+
+
+def test_an_answer_to_an_earlier_event_is_not_taken_for_this_ones(relays, pair):
+    speaker, _ = pair
+    for relay in relays:
+        relay.ok_delay = 0.1  # the OK for what was sent unwaited comes late
+    speaker.publish(1, "sent without waiting", wait=False)
+    time.sleep(0.3)
+    second, responses = speaker.publish(1, "waited for")
+    third, later = speaker.publish(1, "and again")
+    assert all(r[0] == "OK" and r[1] == second["id"] for _, r in responses)
+    assert all(r[0] == "OK" and r[1] == third["id"] for _, r in later)
+
+
+def test_listen_returns_once_the_relays_have_the_subscription(relays, pair):
+    speaker, hearer = pair
+    heard = []
+    hearer.listen(heard.append, kinds=[1], tag_filters={"t": ["now"]})
+    assert any(r.listeners() >= 1 for r in relays)  # no waiting needed
+    event, _ = speaker.publish(1, "straight after", tags=[["t", "now"]])
+    assert until(lambda: heard)
+    assert heard[0]["id"] == event["id"]
+
+
+def test_a_filter_that_cannot_be_used_raises_from_listen(relays, pair):
+    _, hearer = pair
+    with pytest.raises(ValueError):
+        hearer.listen(lambda e: None, authors=["npub1notakey"])
+
+
+def test_two_threads_publishing_at_once_each_get_their_own_answer(relays, pair):
+    speaker, _ = pair
+    for relay in relays:
+        relay.ok_delay = 0.05
+    results = {}
+
+    def send(n):
+        event, responses = speaker.publish(1, f"thread {n}")
+        results[n] = (event["id"], responses)
+
+    threads = [threading.Thread(target=send, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert len(results) == 4
+    for eid, responses in results.values():
+        assert all(r[0] == "OK" and r[1] == eid for _, r in responses)

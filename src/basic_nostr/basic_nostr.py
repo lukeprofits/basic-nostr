@@ -449,11 +449,11 @@ async def _send_to_relays(relays, message):
                 # OK response for our event
                 if response[0] == "OK" and (event_id is None or response[1] == event_id):
                     return (url, response)
-                # Skip AUTH, NOTICE, and other non-OK messages
-                if response[0] in ("AUTH", "NOTICE"):
-                    continue
-                # Unknown message type — return it rather than loop forever
-                return (url, response)
+                # Anything else -- AUTH, NOTICE, or an OK for an event sent
+                # earlier without waiting -- is not our answer: read on until
+                # it comes or the deadline passes. Returning another event's
+                # OK would report its result as ours.
+                continue
         except Exception as e:
             return (url, ["ERROR", str(e)])
 
@@ -683,11 +683,13 @@ async def _send_without_waiting(relays, message):
     async def _send_one(url, ws):
         try:
             await ws.send(msg_str)
-            while True:
+            # bounded: a relay that never falls silent cannot hold us here
+            for _ in range(64):
                 try:
                     await asyncio.wait_for(ws.recv(), timeout=0.01)
                 except asyncio.TimeoutError:
-                    return (url, ["SENT"])
+                    break
+            return (url, ["SENT"])
         except Exception as e:
             return (url, ["ERROR", str(e)])
 
@@ -751,6 +753,7 @@ async def listen(
     tag_filters=None,
     since=None,
     proxy=None,
+    on_ready=None,
 ):
     """Hear matching events as they arrive, until cancelled.
 
@@ -767,6 +770,9 @@ async def listen(
         kinds, authors, tag_filters: as for read_events_from_relays
         since: unix timestamp to start from. Defaults to now: new events only.
         proxy: as for connect_to_relays
+        on_ready: called (on the event loop) each time a relay says it has
+            the subscription (its EOSE): from then on, what is published
+            there is heard.
 
     Runs until its task is cancelled.
     """
@@ -812,17 +818,19 @@ async def listen(
         except Exception as e:
             logger.warning("on_event raised: %s", e)
 
+    loop = asyncio.get_event_loop()
+
     async def _one_relay(url):
         wait = 1.0
         sub_id = secrets.token_hex(8)
         while True:
+            began = loop.time()
             try:
                 kwargs = dict(extra)
                 if url.startswith("wss://"):
                     kwargs["ssl"] = ssl_context
                 async with websockets.connect(url, **kwargs) as ws:
                     await ws.send(json.dumps(["REQ", sub_id, filt]))
-                    wait = 1.0
                     async for raw in ws:
                         try:
                             msg = json.loads(raw)
@@ -835,6 +843,14 @@ async def listen(
                             and msg[1] == sub_id
                         ):
                             _pass_on(msg[2])
+                        elif (
+                            isinstance(msg, list)
+                            and len(msg) >= 2
+                            and msg[0] == "EOSE"
+                            and msg[1] == sub_id
+                            and on_ready is not None
+                        ):
+                            on_ready()  # the relay has it: from now on, heard
                         elif isinstance(msg, list) and msg and msg[0] == "CLOSED":
                             break
             except asyncio.CancelledError:
@@ -842,6 +858,10 @@ async def listen(
             except Exception as e:
                 # dropped or unreachable: try again below
                 logger.debug("relay %s: %s; again in %.0f s", url, e, wait)
+            # A connection that lasted is a fresh start; one a relay cut at
+            # once (CLOSED: auth wanted, rate limited) waits longer each time.
+            if loop.time() - began >= 60.0:
+                wait = 1.0
             await asyncio.sleep(wait)
             wait = min(wait * 2, 60.0)
 
