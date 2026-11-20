@@ -43,6 +43,7 @@ import logging
 import math
 import secrets
 import ssl
+import sys
 import time
 import uuid
 
@@ -403,7 +404,11 @@ async def connect_to_relays(relay_urls=None, proxy=None):
             ws = await websockets.connect(url, **tls, **extra)
             return (url, ws)
         except Exception as e:
-            logger.warning("failed to connect to %s: %s", url, e)
+            # A program exiting has shut the pool name lookups run on: every
+            # relay fails at once, and saying so for each is only noise.
+            quiet = sys.is_finalizing() or "interpreter shutdown" in str(e)
+            log = logger.debug if quiet else logger.warning
+            log("failed to connect to %s: %s", url, e)
             return None
 
     results = await asyncio.gather(*[_try_connect(url) for url in relay_urls])
