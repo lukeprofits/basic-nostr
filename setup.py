@@ -22,7 +22,7 @@ setup(
         # websockets>=15 is where connect() grew native proxy= support
         'proxy': ['python-socks[asyncio]', 'websockets>=15'],
     },
-    python_requires='>=3.9',
+    python_requires='>=3.10',  # 3.9 is end-of-life and no longer testable on CI
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
